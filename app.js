@@ -1,0 +1,289 @@
+const dotenv = require('dotenv');
+
+// get config vars
+dotenv.config();
+const express = require('express');
+const bodyParser = require("body-parser");
+const ejs = require("ejs");
+const mysql = require('mysql');
+const bcrypt = require('bcrypt');
+const port = 3000;
+const session = require('express-session');
+const cookie = require('cookie-parser');
+const app = express();
+const  jwt = require('jsonwebtoken');
+var token = jwt.sign({ foo: 'bar' }, 'shhhhh');
+app.use(cookie());
+app.use(express.static("public"));
+app.use(express.static("views"));
+app.set('view engine', 'ejs');
+app.use(bodyParser.urlencoded({
+  extended: true
+}));
+app.use(bodyParser.json());
+
+const saltRounds = 10;
+
+var connection = mysql.createConnection({
+  host     : 'localhost',
+  user     : 'root',
+  password : 'Kunal2000@',
+  database : 'db'
+});
+connection.connect(function(err){
+if(!err) {
+    console.log("Database is connected");
+} else {
+    console.log(err);
+}
+});
+
+const con = connection;
+
+function generateAccessToken(username) {
+  return jwt.sign(username, process.env.TOKEN_SECRET, { expiresIn: '1800s' });
+}
+
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers['authorization']
+  const token = req.cookies.token;
+
+  if (token == null) return res.sendStatus(401)
+
+  jwt.verify(token, process.env.TOKEN_SECRET , (err= "ERR", user= token) => {
+    console.log(err)
+
+    if (err) return res.sendStatus(403)
+
+    req.user = user
+
+    next()
+  })
+}
+
+
+app.get("/", (req, res) => {
+  res.render('home');
+});
+
+app.get("/register", (req, res) => {
+  res.render("register");
+});
+
+app.get("/login", (req, res) => {
+  res.render("login");
+});
+
+app.post("/register", (req, res) => {
+  const password = req.body.password;
+  const encryptedPassword = bcrypt.hash(password, saltRounds);  
+  var users={
+    "email":req.body.email,
+    "username":req.body.name,
+    "password":encryptedPassword,
+    "address":req.body.address,
+    "phone":req.body.phone
+    }
+
+  
+  connection.query('INSERT INTO users SET ?',users, function (error, results, fields) {
+    if (error) {
+        console.log(error)
+    } else {        
+      const token = generateAccessToken({ username: req.body.username });
+      //res.json(token);
+        res.cookie('token', token);
+        res.redirect("/products");
+      }
+  });
+
+});
+
+app.post("/login", (req, res) => {
+  var email= req.body.email;
+  var password = req.body.password;
+  var encryptedPassword = bcrypt.hash(password, saltRounds);
+  connection.query('SELECT * FROM users WHERE email = ?',[email], async function (error, results, fields) {
+    if (error) {
+      console.log(error);
+    }else{
+      if(results.length >0){
+        if(results[0].password == encryptedPassword){
+          const token = generateAccessToken({ username: req.body.username });
+            res.cookie('token', token);
+            res.redirect("/products")            
+        }
+        else{
+          console.log("Wrong credentials");
+        }
+      }
+      else{
+        console.log("Email doesn't exist");
+      }
+    }
+});
+});
+
+app.get("/products",  authenticateToken,(req, res) => {
+  con.query("SELECT * FROM products", function (err, result, fields) {
+      if (err){
+          console.log(err);
+      }else{
+      res.render('products', {title: 'Shop', products: result});
+      }  
+  });
+});
+
+app.get("/product/:pid", authenticateToken, (req, res) => {
+  con.query("SELECT * FROM products WHERE pid = ?", [req.params.pid], function (err, result, fields) {
+      if (err){
+          console.log(err);
+      }else{
+        res.render('product', {title: 'Product', product: result[0]});
+      }  
+  });
+});
+
+app.get("/viewOrders", authenticateToken, (req, res) => {
+  con.query("SELECT * FROM orders WHERE email = ?", [req.cookies.token], function (err, results, fields) {
+      if (err){
+          console.log(err);
+      }else{
+      console.log(results);
+        results.forEach((result) => {
+          result.items = result.items.split(',');
+        });
+        console.log(results);
+        res.render('viewOrder', {orders : results})
+      }
+  });
+})
+
+app.get("/addtocart/:pid",  authenticateToken,(req, res) =>{
+  let products = [];
+  console.log(req.cookies.cart);
+  if(req.cookies.cart){
+    products = req.cookies.cart;
+  }
+  con.query("SELECT * FROM products WHERE pid = ?", [req.params.pid], function (err, result, fields) { 
+    if (err) {
+      console.log(err)
+    }else{
+      products.push({
+        pid: result[0].pid,
+        title: result[0].title,
+        name: result[0].category,
+        price: result[0].price,
+        picture: result[0].picture,
+        qnt: 1
+      });
+  res.cookie('cart', products);
+  res.redirect('/products');
+    }
+  });
+  
+});
+
+app.get('/cart', authenticateToken , function(req, res) {
+  let products = [];
+  console.log(req.cookies.cart);
+  if(req.cookies.cart) {
+    res.render('cart', {title: 'Cart', products: req.cookies.cart});
+  } else {
+    res.render('cart', {title: 'Cart', products: products});
+  }
+});
+
+app.post('/update-cart', authenticateToken, function(req, res) {
+  let products = req.cookies.cart;
+  products.forEach(function(product, index) {
+    product.qnt = req.body.qnt[index];
+  });
+  res.clearCookie('cart');
+  res.cookie('cart', products);
+  res.redirect('/cart');
+});
+
+app.get('/empty-cart', authenticateToken, function(req, res) {
+  let products = [];
+  res.cookie('cart', products);
+  
+  res.redirect('/cart');
+});
+
+app.get('/remove-from-cart/:pid', authenticateToken, function(req, res) {
+  let products = req.cookies.cart;
+  let index = req.params.pid;
+  products.splice(index, 1);
+  res.cookie('cart', products, {path:'/'});
+  
+  res.redirect('/cart');
+});
+
+app.get('/checkout', authenticateToken, function(req, res) {
+  let products = req.cookies.cart;
+  let total = 0;
+  products.forEach((product) =>{
+    total = total + (product.price * product.qnt);
+  });
+  con.query("SELECT * FROM users WHERE email = ?", [req.cookies.token], function (err, results, fields) {
+    if (err){
+        console.log(err);
+    }else{
+  res.render('order', {title:"cart", user:results[0], totalamount:total});
+    }
+    });
+});
+
+app.get('/placeOrder', authenticateToken, function(req, res) {
+  let items = []
+  let address;
+  let total = 0;
+  let datetime = new Date();
+  let date = (datetime.toISOString().slice(0,10));
+  let time = (datetime.toISOString().slice(11,19));
+  let products = req.cookies.cart;
+  products.forEach((product) =>{
+    total = total + (product.price * product.qnt);
+  });
+  products.forEach((item) => {
+    items.push(item.name);
+    items.push(item.qnt);
+  });
+  items = items.toString();
+  connection.query('SELECT address FROM users WHERE email = ?', [req.cookies.token], function (error, results, fields) {
+    if (error) {
+      console.log(error)
+  } else {
+    address = results[0].address;
+    let order = {
+      "email" : req.cookies.login,
+      "items" : items,
+      "address" : address,
+      "date" : date,
+      "time" : time,
+      "total" : total
+    }
+    connection.query('INSERT INTO orders SET ?',order, function (error, results, fields) {
+      if (error) {
+          console.log(error)
+      } else {        
+        res.clearCookie("cart");
+          res.redirect("/viewOrders");
+        }
+    });
+    }
+  })
+});
+
+app.get("/logout", (req, res) => {
+  res.clearCookie("token");
+  if(req.cookies.cart){
+    res.clearCookie("cart");
+  }
+  res.redirect("/");
+ });
+
+app.listen(port, () => {
+  console.log(`Hosting at http://localhost:${port}`)
+});
